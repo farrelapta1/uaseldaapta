@@ -1,0 +1,95 @@
+import minimalmodbus
+import serial
+import time
+import json
+import paho.mqtt.client as mqtt
+
+# --- KONFIGURASI MQTT ---
+MQTT_BROKER = "broker.emqx.io" 
+MQTT_PORT = 1883
+MQTT_TOPIC = "iot/pzem/data"
+MQTT_CLIENT_ID = "python_pzem_sender"
+
+# --- KONFIGURASI SERIAL (PZEM) ---
+SERIAL_PORT = 'COM8' # Sudah benar sesuai log kamu
+
+# Inisialisasi Koneksi ke Sensor PZEM
+try:
+    instrument = minimalmodbus.Instrument(SERIAL_PORT, 1)
+    instrument.serial.baudrate = 9600
+    instrument.serial.bytesize = 8
+    instrument.serial.parity = serial.PARITY_NONE
+    instrument.serial.stopbits = 1
+    instrument.serial.timeout = 1
+    instrument.mode = minimalmodbus.MODE_RTU
+    instrument.clear_buffers_before_each_transaction = True
+    print(f"Berhasil terhubung ke port {SERIAL_PORT}")
+except Exception as e:
+    print(f"Error membuka Serial Port: {e}")
+    exit()
+
+# Fungsi callback saat berhasil konek ke MQTT
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Terhubung ke MQTT Broker!")
+    else:
+        print(f"Gagal konek ke MQTT, kode: {rc}")
+
+# --- BAGIAN YANG DIPERBAIKI ---
+# Kita gunakan VERSION1 agar format callback (client, userdata, flags, rc) tetap bisa dipakai
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, MQTT_CLIENT_ID)
+client.on_connect = on_connect
+
+# Mencoba koneksi ke Broker
+try:
+    print(f"Menghubungkan ke broker {MQTT_BROKER}...")
+    client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    client.loop_start() 
+except Exception as e:
+    print(f"Tidak bisa konek ke Broker MQTT: {e}")
+    exit()
+
+print("Mulai membaca sensor dan mengirim data... (Tekan Ctrl+C untuk berhenti)")
+
+# --- LOOP UTAMA ---
+try:
+    while True:
+        try:
+            # Membaca data dari PZEM
+            voltage = instrument.read_register(0x0000, functioncode=4, number_of_decimals=1, signed=False)
+            current = instrument.read_register(0x0001, functioncode=4, number_of_decimals=3, signed=False) 
+            power   = instrument.read_register(0x0003, functioncode=4, number_of_decimals=1, signed=False)
+            energy  = instrument.read_long(0x0004, functioncode=4, signed=False) / 1000 
+            frek    = instrument.read_register(0x0007, functioncode=4, number_of_decimals=1, signed=False)
+            pf      = instrument.read_register(0x0008, functioncode=4, number_of_decimals=2, signed=False)
+
+            # Bungkus data JSON
+            payload_dict = {
+                "tegangan": voltage,
+                "arus": current,
+                "daya": power,
+                "energi": energy,
+                "frekuensi": frek,
+                "pf": pf
+            }
+
+            payload_json = json.dumps(payload_dict)
+
+            # Kirim ke MQTT
+            client.publish(MQTT_TOPIC, payload_json)
+            
+            print(f"Data Terkirim: {payload_json}")
+
+        except IOError as e:
+            print("Gagal membaca sensor (IO Error) - Cek kabel/koneksi")
+        except ValueError as e:
+            print("Data sensor aneh/salah format:", e)
+        except Exception as e:
+            print("Error lain:", e)
+
+        time.sleep(2)
+
+except KeyboardInterrupt:
+    print("\nProgram dihentikan oleh user.")
+    client.loop_stop()
+    client.disconnect().
