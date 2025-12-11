@@ -1,95 +1,307 @@
-import minimalmodbus
-import serial
-import time
-import json
-import paho.mqtt.client as mqtt
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PZEM-004T MQTT Dashboard</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
 
-# --- KONFIGURASI MQTT ---
-MQTT_BROKER = "broker.emqx.io" 
-MQTT_PORT = 1883
-MQTT_TOPIC = "iot/pzem/data"
-MQTT_CLIENT_ID = "python_pzem_sender"
+    <style>
+        :root {
+            --bg-color: #121212;
+            --card-bg: #1e1e1e;
+            --text-color: #e0e0e0;
+            --neon-green: #00ff41;
+            --neon-blue: #00d2ff;
+            --neon-red: #ff3131;
+            --neon-yellow: #ffde00;
+        }
 
-# --- KONFIGURASI SERIAL (PZEM) ---
-SERIAL_PORT = 'COM8' # Sudah benar sesuai log kamu
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+        }
 
-# Inisialisasi Koneksi ke Sensor PZEM
-try:
-    instrument = minimalmodbus.Instrument(SERIAL_PORT, 1)
-    instrument.serial.baudrate = 9600
-    instrument.serial.bytesize = 8
-    instrument.serial.parity = serial.PARITY_NONE
-    instrument.serial.stopbits = 1
-    instrument.serial.timeout = 1
-    instrument.mode = minimalmodbus.MODE_RTU
-    instrument.clear_buffers_before_each_transaction = True
-    print(f"Berhasil terhubung ke port {SERIAL_PORT}")
-except Exception as e:
-    print(f"Error membuka Serial Port: {e}")
-    exit()
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
+        }
 
-# Fungsi callback saat berhasil konek ke MQTT
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        print("Terhubung ke MQTT Broker!")
-    else:
-        print(f"Gagal konek ke MQTT, kode: {rc}")
+        h1 { margin: 0; letter-spacing: 2px; }
+        
+        #status {
+            font-size: 0.9rem;
+            margin-top: 5px;
+            color: #888;
+        }
+        
+        .status-dot {
+            height: 10px;
+            width: 10px;
+            background-color: red;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+        }
 
-# --- BAGIAN YANG DIPERBAIKI ---
-# Kita gunakan VERSION1 agar format callback (client, userdata, flags, rc) tetap bisa dipakai
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, MQTT_CLIENT_ID)
-client.on_connect = on_connect
+        /* Grid Layout untuk Kartu Nilai */
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
 
-# Mencoba koneksi ke Broker
-try:
-    print(f"Menghubungkan ke broker {MQTT_BROKER}...")
-    client.connect(MQTT_BROKER, MQTT_PORT, 60)
-    client.loop_start() 
-except Exception as e:
-    print(f"Tidak bisa konek ke Broker MQTT: {e}")
-    exit()
+        .card {
+            background-color: var(--card-bg);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            border: 1px solid #333;
+        }
 
-print("Mulai membaca sensor dan mengirim data... (Tekan Ctrl+C untuk berhenti)")
+        .card h3 {
+            margin: 0 0 10px 0;
+            font-size: 1rem;
+            color: #aaa;
+            text-transform: uppercase;
+        }
 
-# --- LOOP UTAMA ---
-try:
-    while True:
-        try:
-            # Membaca data dari PZEM
-            voltage = instrument.read_register(0x0000, functioncode=4, number_of_decimals=1, signed=False)
-            current = instrument.read_register(0x0001, functioncode=4, number_of_decimals=3, signed=False) 
-            power   = instrument.read_register(0x0003, functioncode=4, number_of_decimals=1, signed=False)
-            energy  = instrument.read_long(0x0004, functioncode=4, signed=False) / 1000 
-            frek    = instrument.read_register(0x0007, functioncode=4, number_of_decimals=1, signed=False)
-            pf      = instrument.read_register(0x0008, functioncode=4, number_of_decimals=2, signed=False)
+        /* Gaya Tampilan Digital / 7-Segment */
+        .digital-value {
+            font-family: 'Orbitron', sans-serif; /* Font Digital */
+            font-size: 2.5rem;
+            font-weight: 700;
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.2); /* Efek Glow */
+        }
 
-            # Bungkus data JSON
-            payload_dict = {
-                "tegangan": voltage,
-                "arus": current,
-                "daya": power,
-                "energi": energy,
-                "frekuensi": frek,
-                "pf": pf
+        .unit {
+            font-size: 1rem;
+            color: #777;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        /* Warna spesifik untuk tiap parameter */
+        .val-voltage { color: var(--neon-yellow); text-shadow: 0 0 10px var(--neon-yellow); }
+        .val-current { color: var(--neon-blue); text-shadow: 0 0 10px var(--neon-blue); }
+        .val-power { color: var(--neon-red); text-shadow: 0 0 10px var(--neon-red); }
+        .val-energy { color: var(--neon-green); text-shadow: 0 0 10px var(--neon-green); }
+
+        /* Area Grafik */
+        .charts-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+
+        .chart-wrapper {
+            background-color: var(--card-bg);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>MONITORING LISTRIK (PZEM-004T)</h1>
+        <div id="status"><span class="status-dot" id="statusDot"></span>Status: <span id="statusText">Disconnected</span></div>
+    </header>
+
+    <div class="grid-container">
+        <div class="card">
+            <h3>Tegangan</h3>
+            <div class="digital-value val-voltage" id="disp-voltage">0.0</div>
+            <span class="unit">Volt (V)</span>
+        </div>
+        <div class="card">
+            <h3>Arus</h3>
+            <div class="digital-value val-current" id="disp-current">0.000</div>
+            <span class="unit">Ampere (A)</span>
+        </div>
+        <div class="card">
+            <h3>Daya Aktif</h3>
+            <div class="digital-value val-power" id="disp-power">0.0</div>
+            <span class="unit">Watt (W)</span>
+        </div>
+        <div class="card">
+            <h3>Total Energi</h3>
+            <div class="digital-value val-energy" id="disp-energy">0.00</div>
+            <span class="unit">kWh</span>
+        </div>
+        <div class="card">
+            <h3>Frekuensi</h3>
+            <div class="digital-value" id="disp-freq" style="color: #fff;">0.0</div>
+            <span class="unit">Hz</span>
+        </div>
+        <div class="card">
+            <h3>Power Factor</h3>
+            <div class="digital-value" id="disp-pf" style="color: #fff;">0.00</div>
+            <span class="unit">PF</span>
+        </div>
+    </div>
+
+    <div class="charts-container">
+        <div class="chart-wrapper">
+            <canvas id="chartPower"></canvas>
+        </div>
+        <div class="chart-wrapper">
+            <canvas id="chartVoltage"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // --- KONFIGURASI MQTT ---
+        // PENTING: Untuk GitHub Pages (HTTPS), kita harus pakai WSS (Secure WebSocket).
+        // Broker EMQX mendukung WSS di port 8084.
+        const mqtt_broker = "broker.emqx.io";
+        const mqtt_port = 8084; 
+        const mqtt_topic = "iot/pzem/data";
+        const client_id = "web_dashboard_" + Math.random().toString(16).substr(2, 8);
+
+        // --- INISIALISASI CHART.JS ---
+        const maxDataPoints = 20; // Jumlah data maksimal di grafik agar tidak menumpuk
+
+        // Grafik Daya (Watt)
+        const ctxPower = document.getElementById('chartPower').getContext('2d');
+        const chartPower = new Chart(ctxPower, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Daya (Watt)',
+                    data: [],
+                    borderColor: '#ff3131',
+                    backgroundColor: 'rgba(255, 49, 49, 0.2)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.4 // Garis melengkung
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    x: { ticks: { color: '#888' }, grid: { color: '#333' } },
+                    y: { ticks: { color: '#888' }, grid: { color: '#333' }, beginAtZero: true }
+                },
+                plugins: { legend: { labels: { color: '#fff' } } }
             }
+        });
 
-            payload_json = json.dumps(payload_dict)
+        // Grafik Tegangan (Volt)
+        const ctxVolt = document.getElementById('chartVoltage').getContext('2d');
+        const chartVoltage = new Chart(ctxVolt, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Tegangan (Volt)',
+                    data: [],
+                    borderColor: '#ffde00',
+                    borderWidth: 2,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    x: { ticks: { color: '#888' }, grid: { color: '#333' } },
+                    y: { ticks: { color: '#888' }, grid: { color: '#333' }, suggestedMin: 200, suggestedMax: 240 }
+                },
+                plugins: { legend: { labels: { color: '#fff' } } }
+            }
+        });
 
-            # Kirim ke MQTT
-            client.publish(MQTT_TOPIC, payload_json)
+        // --- LOGIKA MQTT ---
+        const client = new Paho.MQTT.Client(mqtt_broker, mqtt_port, client_id);
+
+        // Callback ketika koneksi hilang
+        client.onConnectionLost = function (responseObject) {
+            console.log("Koneksi Hilang: " + responseObject.errorMessage);
+            document.getElementById("statusText").innerText = "Disconnected";
+            document.getElementById("statusDot").style.backgroundColor = "red";
+            // Coba konek lagi setelah 5 detik
+            setTimeout(connectMQTT, 5000);
+        };
+
+        // Callback ketika pesan masuk
+        client.onMessageArrived = function (message) {
+            console.log("Data Masuk: " + message.payloadString);
             
-            print(f"Data Terkirim: {payload_json}")
+            try {
+                const data = JSON.parse(message.payloadString);
 
-        except IOError as e:
-            print("Gagal membaca sensor (IO Error) - Cek kabel/koneksi")
-        except ValueError as e:
-            print("Data sensor aneh/salah format:", e)
-        except Exception as e:
-            print("Error lain:", e)
+                // 1. Update Angka Digital
+                document.getElementById('disp-voltage').innerText = data.tegangan.toFixed(1);
+                document.getElementById('disp-current').innerText = data.arus.toFixed(3);
+                document.getElementById('disp-power').innerText = data.daya.toFixed(1);
+                document.getElementById('disp-energy').innerText = data.energi.toFixed(2);
+                document.getElementById('disp-freq').innerText = data.frekuensi.toFixed(1);
+                document.getElementById('disp-pf').innerText = data.pf.toFixed(2);
 
-        time.sleep(2)
+                // 2. Update Grafik
+                updateChart(chartPower, data.daya);
+                updateChart(chartVoltage, data.tegangan);
 
-except KeyboardInterrupt:
-    print("\nProgram dihentikan oleh user.")
-    client.loop_stop()
-    client.disconnect().
+            } catch (e) {
+                console.error("Error parsing JSON: ", e);
+            }
+        };
+
+        // Fungsi Update Grafik agar bergerak (scrolling)
+        function updateChart(chart, value) {
+            const now = new Date();
+            const timeLabel = now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds();
+
+            chart.data.labels.push(timeLabel);
+            chart.data.datasets.forEach((dataset) => {
+                dataset.data.push(value);
+            });
+
+            // Hapus data lama jika melebihi batas
+            if (chart.data.labels.length > maxDataPoints) {
+                chart.data.labels.shift();
+                chart.data.datasets.forEach((dataset) => {
+                    dataset.data.shift();
+                });
+            }
+            chart.update();
+        }
+
+        // Fungsi Koneksi
+        function connectMQTT() {
+            document.getElementById("statusText").innerText = "Connecting...";
+            client.connect({
+                onSuccess: function () {
+                    console.log("Berhasil Konek ke Broker!");
+                    document.getElementById("statusText").innerText = "Connected (Live)";
+                    document.getElementById("statusDot").style.backgroundColor = "#00ff41";
+                    client.subscribe(mqtt_topic);
+                },
+                onFailure: function (e) {
+                    console.log("Gagal Konek: " + e.errorMessage);
+                    document.getElementById("statusText").innerText = "Error";
+                    setTimeout(connectMQTT, 5000);
+                },
+                useSSL: true // Wajib True untuk GitHub Pages
+            });
+        }
+
+        // Mulai Koneksi saat halaman dimuat
+        connectMQTT();
+
+    </script>
+</body>
+</html>
